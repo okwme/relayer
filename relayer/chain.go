@@ -21,14 +21,19 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
 	authTypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	transfertypes "github.com/cosmos/cosmos-sdk/x/ibc/applications/transfer/types"
 	clienttypes "github.com/cosmos/cosmos-sdk/x/ibc/core/02-client/types"
+	conntypes "github.com/cosmos/cosmos-sdk/x/ibc/core/03-connection/types"
+	chantypes "github.com/cosmos/cosmos-sdk/x/ibc/core/04-channel/types"
 	"github.com/cosmos/go-bip39"
 	"github.com/gogo/protobuf/proto"
+	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/log"
 	rpcclient "github.com/tendermint/tendermint/rpc/client"
 	rpchttp "github.com/tendermint/tendermint/rpc/client/http"
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	libclient "github.com/tendermint/tendermint/rpc/jsonrpc/client"
+	tmtypes "github.com/tendermint/tendermint/types"
 )
 
 var (
@@ -79,6 +84,13 @@ func ValidatePaths(src, dst *Chain) error {
 func (c *Chain) ListenRPCEmitJSON(tx, block, data bool) func() {
 	doneChan := make(chan struct{})
 	go c.listenLoop(doneChan, tx, block, data)
+	return func() { doneChan <- struct{}{} }
+}
+
+// ListenRPCTestTypedEvents listens for tx events from a chain and parses them into typed events
+func (c *Chain) ListenRPCTestTypedEvents() func() {
+	doneChan := make(chan struct{})
+	go c.simpleListenLoop(doneChan)
 	return func() { doneChan <- struct{}{} }
 }
 
@@ -138,6 +150,153 @@ func (c *Chain) listenLoop(doneChan chan struct{}, tx, block, data bool) {
 			close(doneChan)
 			return
 		}
+	}
+}
+
+func (c *Chain) simpleListenLoop(doneChan chan struct{}) {
+	// Subscribe to source chain
+	if err := c.Start(); err != nil {
+		c.Error(err)
+		return
+	}
+
+	srcTxEvents, srcTxCancel, err := c.Subscribe(txEvents)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	defer srcTxCancel()
+
+	srcBlockEvents, srcBlockCancel, err := c.Subscribe(blEvents)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	defer srcBlockCancel()
+
+	// Listen to channels and take appropriate action
+	for {
+		select {
+		case srcMsg := <-srcTxEvents:
+			eves, err := ResultEventToABCIEvent(srcMsg)
+			if err != nil {
+				c.Error(err)
+			}
+			for _, eve := range eves {
+				msg, _ := sdk.ParseTypedEvent(eve)
+				HandleProtoEvent(msg)
+			}
+		case srcMsg := <-srcBlockEvents:
+			eves, err := ResultEventToABCIEvent(srcMsg)
+			if err != nil {
+				c.Error(err)
+			}
+			for _, eve := range eves {
+				msg, _ := sdk.ParseTypedEvent(eve)
+				HandleProtoEvent(msg)
+			}
+		case <-doneChan:
+			close(doneChan)
+			return
+		}
+	}
+}
+
+// ResultEventToABCIEvent takes the ctypes.ResultEvent and casts it to a TxResult, extracting the []abci.Event
+func ResultEventToABCIEvent(rev ctypes.ResultEvent) ([]abci.Event, error) {
+	switch rev.Query {
+	case txEvents:
+		var txResult abci.TxResult
+		txResBytes, err := json.Marshal(rev.Data)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(txResBytes, &txResult); err != nil {
+			return nil, fmt.Errorf("failed to unmarshall into abci.TxResult: %s", string(txResBytes))
+		}
+		return txResult.Result.Events, nil
+	case blEvents:
+		var blResult tmtypes.EventDataNewBlock
+		bl, err := json.Marshal(rev.Data)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(bl, &blResult); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal into tmtypes.EventDataNewBlock: %s", string(bl))
+		}
+		out := []abci.Event{}
+		for _, eve := range blResult.ResultBeginBlock.Events {
+			out = append(out, eve)
+		}
+		for _, eve := range blResult.ResultEndBlock.Events {
+			out = append(out, eve)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("not where we exect: %s", rev.Query)
+	}
+}
+
+// HandleProtoEvent prints the type of proto event
+func HandleProtoEvent(eve proto.Message) {
+	switch foo := eve.(type) {
+	case *clienttypes.EventCreateClient:
+		fmt.Println("*clienttypes.EventCreateClient")
+	case *clienttypes.EventUpdateClient:
+		fmt.Println("*clienttypes.EventUpdateClient")
+	case *clienttypes.EventUpgradeClient:
+		fmt.Println("*clienttypes.EventUpgradeClient")
+	case *clienttypes.EventUpdateClientProposal:
+		fmt.Println("*clienttypes.EventUpdateClientProposal")
+	case *clienttypes.EventClientMisbehaviour:
+		fmt.Println("*clienttypes.EventClientMisbehaviour")
+	case *conntypes.EventConnectionOpenInit:
+		fmt.Println("*conntypes.EventConnectionOpenInit")
+	case *conntypes.EventConnectionOpenTry:
+		fmt.Println("*conntypes.EventConnectionOpenTry")
+	case *conntypes.EventConnectionOpenAck:
+		fmt.Println("*conntypes.EventConnectionOpenAck")
+	case *conntypes.EventConnectionOpenConfirm:
+		fmt.Println("*conntypes.EventConnectionOpenConfirm")
+	case *chantypes.EventChannelOpenInit:
+		fmt.Println("*chantypes.EventChannelOpenInit")
+	case *chantypes.EventChannelOpenTry:
+		fmt.Println("*chantypes.EventChannelOpenTry")
+	case *chantypes.EventChannelOpenAck:
+		fmt.Println("*chantypes.EventChannelOpenAck")
+	case *chantypes.EventChannelCloseInit:
+		fmt.Println("*chantypes.EventChannelCloseInit")
+	case *chantypes.EventChannelOpenConfirm:
+		fmt.Println("*chantypes.EventChannelOpenConfirm")
+	case *chantypes.EventChannelCloseConfirm:
+		fmt.Println("*chantypes.EventChannelCloseConfirm")
+	case *chantypes.EventChannelSendPacket:
+		fmt.Println("*chantypes.EventChannelSendPacket")
+	case *chantypes.EventChannelRecvPacket:
+		fmt.Println("*chantypes.EventChannelRecvPacket")
+	case *chantypes.EventChannelWriteAck:
+		fmt.Println("*chantypes.EventChannelWriteAck")
+	case *chantypes.EventChannelAckPacket:
+		fmt.Println("*chantypes.EventChannelAckPacket")
+	case *chantypes.EventChannelTimeoutPacket:
+		fmt.Println("*chantypes.EventChannelTimeoutPacket")
+	case *transfertypes.EventOnRecvPacket:
+		fmt.Println("*transfertypes.EventOnRecvPacket")
+	case *transfertypes.EventOnAcknowledgementPacket:
+		fmt.Println("*transfertypes.EventOnAcknowledgementPacket")
+	case *transfertypes.EventAcknowledgementSuccess:
+		fmt.Println("*transfertypes.EventAcknowledgementSuccess")
+	case *transfertypes.EventAcknowledgementError:
+		fmt.Println("*transfertypes.EventAcknowledgementError")
+	case *transfertypes.EventOnTimeoutPacket:
+		fmt.Println("*transfertypes.EventOnTimeoutPacket")
+	case *transfertypes.EventTransfer:
+		fmt.Println("*transfertypes.EventTransfer")
+	case *transfertypes.EventDenominationTrace:
+		fmt.Println("*transfertypes.EventDenominationTrace")
+	case nil:
+	default:
+		fmt.Printf("NOT AN EVENT? %T\n", foo)
 	}
 }
 
