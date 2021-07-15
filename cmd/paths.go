@@ -8,11 +8,11 @@ import (
 	"os"
 	"strings"
 
-	clienttypes "github.com/cosmos/cosmos-sdk/x/ibc/core/02-client/types"
-	conntypes "github.com/cosmos/cosmos-sdk/x/ibc/core/03-connection/types"
-	chantypes "github.com/cosmos/cosmos-sdk/x/ibc/core/04-channel/types"
-	"github.com/cosmos/cosmos-sdk/x/ibc/core/exported"
-	tmclient "github.com/cosmos/cosmos-sdk/x/ibc/light-clients/07-tendermint/types"
+	clienttypes "github.com/cosmos/ibc-go/modules/core/02-client/types"
+	conntypes "github.com/cosmos/ibc-go/modules/core/03-connection/types"
+	chantypes "github.com/cosmos/ibc-go/modules/core/04-channel/types"
+	"github.com/cosmos/ibc-go/modules/core/exported"
+	tmclient "github.com/cosmos/ibc-go/modules/light-clients/07-tendermint/types"
 	"github.com/cosmos/relayer/helpers"
 	"github.com/cosmos/relayer/relayer"
 	"github.com/gorilla/mux"
@@ -106,7 +106,7 @@ $ %s pth gen ibc-0 ibc-1 demo-path --unordered false --version ics20-2`, appName
 				switch cs := clnt.(type) {
 				case *tmclient.ClientState:
 					// if the client is an active tendermint client for the counterparty chain then we reuse it
-					if cs.ChainId == c[dst].ChainID && !cs.IsFrozen() {
+					if cs.ChainId == c[dst].ChainID && cs.FrozenHeight.IsZero() {
 						path.Src.ClientID = idCs.ClientId
 					}
 				default:
@@ -124,7 +124,7 @@ $ %s pth gen ibc-0 ibc-1 demo-path --unordered false --version ics20-2`, appName
 				switch cs := clnt.(type) {
 				case *tmclient.ClientState:
 					// if the client is an active tendermint client for the counterparty chain then we reuse it
-					if cs.ChainId == c[src].ChainID && !cs.IsFrozen() {
+					if cs.ChainId == c[src].ChainID && cs.FrozenHeight.IsZero() {
 						path.Dst.ClientID = idCs.ClientId
 					}
 				default:
